@@ -1,0 +1,34 @@
+There are 5 types of coal say A, B, C, D, E.
+
+Their GCVs are 3700, 2800, 4600, 3950, 4300 respectively
+
+There are 4 phase of Units, Phase 1, Phase 2, Phase 3 and Phase 4.
+
+Phase 1 requires GCV of 4700
+Phase 2, 3 and 4 requires GCV of 4200
+
+We can give procurement requirement for B, C and D type Coal.
+
+Type B coal is required to maintain minimum stock of Type B Coal Only. Stock for this should not be zero.
+Type C and Type D coal is required to maintain safety stock of 5.5 lakh MT. (3.5 at Port and 2 at site)
+
+At site Coal is stocked phase wise, that is phase 1, phase 2, phase 3, phase 4. For Phase 1, Coal having 4700 GCV is stocked while for other phases 4200 GCV Coal is stocked.
+At port, Coal is stocked as per types of Coal that is A, B, C, D, E
+
+In Phase 1 and Phase 2 Coal will be supplied directly from port.
+In Phase 3 and 4, 200 + 200 MT of Coal will be supplied from site stock and rest will be supplied from port directly.
+
+I have initial stock for each type of coal in port.
+I have initial stock for each phase of coal at site.
+I have day wise generation plan for each phase.
+I have coal delivery plan at port for each type coal (Coal is supplied as bulk quantity as 1.6 Lakh MT or 0.8 Lakh MT)
+
+I need to predict blending of Coal to be supplied from port to meet the requirement of GCV. Also Blending should consider available stock at that moment for each type of coal at that moment.
+Based on that, coal consumption for each phase needs to be calculated.
+Based on that, supply from port is to be calculated for each type of Coal (200 + 200 MT of Coal will be supplied from site stock for phase 3 and 4)
+Based on that day wise additional coal procurement plan for next 3 months (Coal is supplied as bulk quantity as 1.6 Lakh MT or 0.8 Lakh MT)
+
+Coal to Generation ratio for phase 1 = 100
+Coal to Generation ratio for phase 2 = 200
+Coal to Generation ratio for phase 3 = 300
+Coal to Generation ratio for phase 4 = 400
