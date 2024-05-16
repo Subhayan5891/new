@@ -1,0 +1,209 @@
+import pandas as pd
+from pulp import LpMinimize, LpProblem, LpVariable, lpSum, value
+import os
+
+# Function to read data from Excel
+def read_data(file_path):
+    initial_port_stock = pd.read_excel(file_path, sheet_name='Initial_Port_Stock')
+    initial_site_stock = pd.read_excel(file_path, sheet_name='Initial_Site_Stock')
+    generation_plan = pd.read_excel(file_path, sheet_name='Generation_Plan')
+    delivery_plan = pd.read_excel(file_path, sheet_name='Delivery_Plan')
+    return initial_port_stock, initial_site_stock, generation_plan, delivery_plan
+
+# Function to define the optimization model
+def blend_coal(required_gcv, available_stock):
+    coal_types = available_stock.keys()
+    gcv_values = {
+        'A': 3700,
+        'B': 2800,
+        'C': 4600,
+        'D': 3950,
+        'E': 4300
+    }
+    
+    # Define the problem
+    model = LpProblem(name="coal-blending", sense=LpMinimize)
+    
+    # Define the variables
+    coal_vars = {coal: LpVariable(name=f"coal_{coal}", lowBound=0) for coal in coal_types}
+    
+    # Define the total coal amount
+    total_coal = lpSum(coal_vars[coal] for coal in coal_types)
+    
+    # Achieved GCV
+    achieved_gcv = lpSum(coal_vars[coal] * gcv_values[coal] for coal in coal_types)
+    
+    # Define the absolute difference between achieved GCV and required GCV
+    deviation_above = LpVariable(name="deviation_above", lowBound=0)
+    deviation_below = LpVariable(name="deviation_below", lowBound=0)
+    model += deviation_above + deviation_below, "Objective"
+    
+    # Constraints to ensure that the achieved GCV is close to the required GCV
+    model += (achieved_gcv - required_gcv * total_coal <= deviation_above, "deviation_above_constraint")
+    model += (required_gcv * total_coal - achieved_gcv <= deviation_below, "deviation_below_constraint")
+    
+    # Stock constraints
+    for coal in coal_types:
+        model += (coal_vars[coal] <= available_stock[coal], f"stock_constraint_{coal}")
+    
+    # Add a constraint to ensure total coal is greater than a small positive value to avoid zero division
+    model += (total_coal >= 1e-3, "total_coal_constraint")
+    
+    # Solve the problem
+    model.solve()
+    
+    # Get the results
+    blended_coal = {coal: coal_vars[coal].varValue for coal in coal_types}
+    total_blended_amount = sum(blended_coal.values())
+    
+    if total_blended_amount > 0:
+        achieved_gcv_value = sum(blended_coal[coal] * gcv_values[coal] for coal in coal_types) / total_blended_amount
+    else:
+        achieved_gcv_value = 0
+    deviation = deviation_above.varValue + deviation_below.varValue
+    
+    return blended_coal, achieved_gcv_value, deviation
+
+# Function to calculate daily coal consumption
+def calculate_consumption(generation_plan, coal_to_generation_ratios):
+    consumption = generation_plan.copy()
+    for phase in ['Phase 1', 'Phase 2', 'Phase 3', 'Phase 4']:
+        consumption[phase] = generation_plan[phase] * coal_to_generation_ratios[phase]
+    return consumption
+
+# Function to calculate supply from port and site
+def calculate_supply(consumption, site_stock, port_stock):
+    supply = {coal: 0 for coal in port_stock.keys()}
+    for phase in ['Phase 1', 'Phase 2']:
+        supply = {coal: supply[coal] + consumption[phase] for coal in supply.keys()}
+    for phase in ['Phase 3', 'Phase 4']:
+        supply = {coal: supply[coal] + (consumption[phase] - 400) for coal in supply.keys()}  # 200+200 MT from site, rest from port
+    return supply
+
+# Function to update stock levels at the port
+def update_port_stock(port_stock, supply):
+    for coal in supply:
+        port_stock[coal] -= supply[coal]
+    return port_stock
+
+# Function to update stock levels at the site
+def update_site_stock(site_stock, phase, supply_amount):
+    if phase in site_stock:
+        site_stock[phase] = max(site_stock[phase] - supply_amount, 0)
+    return site_stock
+
+# Function to calculate additional procurement requirements
+def calculate_procurement(port_stock, safety_stock=550000, bulk_size=160000):
+    additional_procurement = {'B': 0, 'C': 0, 'D': 0}
+    total_stock = sum(port_stock.values())
+    
+    if port_stock['B'] == 0:
+        additional_procurement['B'] = bulk_size
+    
+    for coal in ['C', 'D']:
+        while total_stock < safety_stock:
+            additional_procurement[coal] += bulk_size
+            total_stock += bulk_size
+    
+    return additional_procurement
+
+
+def main(file_path):
+    initial_port_stock, initial_site_stock, generation_plan, delivery_plan = read_data(file_path)
+    
+    port_stock = initial_port_stock.set_index('Type')['Stock (MT)'].to_dict()
+    site_stock = initial_site_stock.set_index('Phase')['Stock (MT)'].to_dict()
+    
+    # Ensure all values in port_stock and site_stock are numeric
+    port_stock = {key: float(value) for key, value in port_stock.items()}
+    site_stock = {key: float(value) for key, value in site_stock.items()}
+    
+    # Initialize DataFrames
+    blended_coal_df = pd.DataFrame(columns=['Date', 'Phase', 'Type', 'Amount'])
+    achieved_gcvs_df = pd.DataFrame(columns=['Date', 'Phase', 'Achieved GCV'])
+    deviations_df = pd.DataFrame(columns=['Date', 'Phase', 'Deviation'])
+    additional_procurement_df = pd.DataFrame(columns=[
+        'Date', 'Consumption (Phase 1)', 'Consumption (Phase 2)', 'Consumption (Phase 3)', 'Consumption (Phase 4)',
+        'Port Stock (A)', 'Port Stock (B)', 'Port Stock (C)', 'Port Stock (D)', 'Port Stock (E)',
+        'Site Stock (Phase 1)', 'Site Stock (Phase 2)', 'Site Stock (Phase 3)', 'Site Stock (Phase 4)',
+        'Supply (A)', 'Supply (B)', 'Supply (C)', 'Supply (D)', 'Supply (E)',
+        'Additional (B)', 'Additional (C)', 'Additional (D)'
+    ])
+    
+    coal_to_generation_ratios = {
+        'Phase 1': 84.24,
+        'Phase 2': 84.24,
+        'Phase 3': 177.2571,
+        'Phase 4': 263.6229
+    }
+    for date in pd.to_datetime(generation_plan['Date']):
+        daily_consumption = {}
+        for phase in ['Phase 1', 'Phase 2', 'Phase 3', 'Phase 4']:
+            required_gcv = 4700 if phase == 'Phase 1' else 4200
+            blended_coal, achieved_gcv, deviation = blend_coal(required_gcv, port_stock)
+            
+            # Update stock levels at port after blending
+            port_stock = update_port_stock(port_stock, blended_coal)
+            
+            for coal, amount in blended_coal.items():
+                blended_coal_df = blended_coal_df.append({'Date': date, 'Phase': phase, 'Type': coal, 'Amount': amount}, ignore_index=True)
+            
+            achieved_gcvs_df = achieved_gcvs_df.append({'Date': date, 'Phase': phase, 'Achieved GCV': achieved_gcv}, ignore_index=True)
+            deviations_df = deviations_df.append({'Date': date, 'Phase': phase, 'Deviation': deviation}, ignore_index=True)
+        
+        # Calculate additional procurement requirements
+        additional_procurement = calculate_procurement(port_stock)
+        
+        # Track daily consumption and stock
+        consumption_values = {}
+        supply_values = {}
+        additional_values = {'B': 0, 'C': 0, 'D': 0}
+        
+        for phase in ['Phase 1', 'Phase 2', 'Phase 3', 'Phase 4']:
+            daily_consumption[phase] = generation_plan.loc[generation_plan['Date'] == date, phase].values[0]
+            consumption_values[f'Consumption (Phase {phase.split()[-1]})'] = daily_consumption[phase]
+        
+        # Calculate coal consumption
+        coal_to_generation_ratios = {
+        'Phase 1': 84.24,
+        'Phase 2': 84.24,
+        'Phase 3': 177.2571,
+        'Phase 4': 263.6229
+        }
+        consumption = calculate_consumption(generation_plan[generation_plan['Date'] == date], coal_to_generation_ratios)
+        
+        # Calculate supply from port and site
+        supply = calculate_supply(consumption, site_stock, port_stock)
+        
+        for coal in port_stock.keys():
+            supply_values[f'Supply ({coal})'] = supply[coal]
+        
+        # Update port stock with the procured coal
+        for coal, amount in additional_procurement.items():
+            port_stock[coal] += amount
+            additional_values[f'Additional ({coal})'] = amount
+        
+        # Update site stock based on supply
+        site_stock = update_site_stock(site_stock, 'Phase 3', 200)
+        site_stock = update_site_stock(site_stock, 'Phase 4', 200)
+
+        # Append daily data to additional_procurement_df
+        additional_procurement_df = additional_procurement_df.append({
+            'Date': date,
+            **consumption_values,
+            **{f'Port Stock ({coal})': port_stock.get(coal, 0) for coal in port_stock.keys()},
+            **{f'Site Stock (Phase {phase.split()[-1]})': site_stock.get(phase, 0) for phase in ['Phase 1', 'Phase 2', 'Phase 3', 'Phase 4']},
+            **supply_values,
+            **additional_values
+        }, ignore_index=True)
+    
+    # Save results to the same file location
+    output_file_path = os.path.splitext(file_path)[0] + '_results.xlsx'
+    
+    with pd.ExcelWriter(output_file_path) as writer:
+        blended_coal_df.to_excel(writer, sheet_name='Blended_Coal', index=False)
+        achieved_gcvs_df.to_excel(writer, sheet_name='Achieved_GCVs', index=False)
+        deviations_df.to_excel(writer, sheet_name='Deviations', index=False)
+        additional_procurement_df.to_excel(writer, sheet_name='Additional_Procurement', index=False)
+    
+    print(f'Results saved to {output_file_path}')
